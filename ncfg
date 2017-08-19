@@ -1,0 +1,236 @@
+#!/usr/bin/env python
+
+import os
+
+
+
+def parse_interface_config(filepath):
+    networks = []
+    mapping = None
+    interface = None
+    network = None
+    address = None
+    netmask = None
+    gateway = None
+    iface_line_number = 0
+    ssid = None
+    key = None
+    inside_iface_section = False
+    current_line_number = 0
+
+    with open(filepath) as f:
+        for line in f.readlines():
+            line = line.strip()
+
+            # ignore commented lines
+            if not line.startswith("#"):
+                # look for mapping
+                if line.startswith("mapping"):
+                    mapping = line.split()[1]
+                # look for interface
+                elif line.startswith("iface"):
+                    # if already inside an iface section then save current iface info
+                    if inside_iface_section:
+                        if mapping:
+                            network = interface
+                            interface = mapping
+                        else:
+                            interface = interface
+                            network = interface
+
+                        networks.append( {"interface":interface,"network":network,"address":address,"netmask":netmask,"gateway":gateway,"ssid":ssid,"key":key,"file":filepath,"line":iface_line_number} )
+                        interface = None
+                        network = None
+                        address = None
+                        netmask = None
+                        gateway = None
+                        ssid = None
+                        key = None
+                    else:
+                        inside_iface_section = True
+
+                    interface = line.split()[1]
+                    iface_line_number = current_line_number + 1  # editors index from 1 not 0 
+                elif line.startswith("address"):
+                    address = line.split()[1]
+                elif line.startswith("netmask"):
+                    netmask = line.split()[1]
+                elif line.startswith("gateway"):
+                    gateway = line.split()[1]
+                elif line.startswith("wpa-ssid"):
+                    ssid = line.split()[1]
+                elif line.startswith("wireless-essid"):
+                    ssid = line.split()[1]
+                elif line.startswith("wpa-psk"):
+                    key = line.split()[1]
+                elif line.startswith("wireless-key"):
+                    key = line.split()[1]
+
+            current_line_number += 1
+
+        # if already inside an iface section then save current iface info
+        if inside_iface_section:
+            if mapping:
+                network = interface
+                interface = mapping
+            else:
+                interface = interface
+                network = interface
+
+            networks.append( {"interface":interface,"network":network,"address":address,"netmask":netmask,"gateway":gateway,"ssid":ssid,"key":key,"file":filepath,"line":iface_line_number} )
+
+        # remove lo network
+        networks = [x for x in networks if x["interface"] != "lo"]
+
+        # complete info for all networks
+        for network in networks:
+            if network["address"]:
+                network["type"] = "static"
+            else:
+                network["type"] = "dhcp"
+
+            if network["ssid"]:
+                network["connection"] = "wireless"
+            else:
+                network["connection"] = "wired"
+
+
+
+    return networks
+
+
+def parse_interfaces():
+    networks = []
+    INTERFACES_FILE = "/etc/network/interfaces"
+    INTERFACES_DIR = "/etc/network/interfaces.d"
+
+    # parse the interfaces file
+    for network in parse_interface_config(INTERFACES_FILE):
+        networks.append(network)
+
+    # parse files in the interfaces drop directory
+    for config_file in os.listdir(INTERFACES_DIR):
+        for network in parse_interface_config(os.path.join(INTERFACES_DIR,config_file)):
+            networks.append(network)
+
+    return networks
+
+
+
+#=================================== main =================================== 
+if __name__ == "__main__":
+    import argparse
+    import subprocess
+
+    # === constants ===
+    COLOR_GREEN = "\033[92m"
+    COLOR_BLUE = "\033[94m"
+    COLOR_YELLOW = "\033[93m"
+    COLOR_RED = "\033[91m"
+    COLOR_END = "\033[0m"
+    CURRENT_INFO_PATH = "/tmp/ncfg.tmp"
+
+    # === handle command line params ===
+    arg_parser = argparse.ArgumentParser(description="Command Line Network Manager Script")
+    arg_parser.add_argument("network", nargs="?", help="name of network connection (or down to bring current network down)")
+    arg_parser.add_argument("operation", nargs="?", help="name of operation (up, down, edit)")
+    args = arg_parser.parse_args()
+
+    # === variables ===
+    networks = parse_interfaces()
+    interfaces = sorted(list(set([x["interface"] for x in networks])))
+    current_network = None
+
+
+    # try to read current network info
+    try:
+        with open(CURRENT_INFO_PATH) as f:
+            current_network = eval(f.read())
+    except:
+        current_network = None
+
+
+    # no network specified
+    if not args.network:
+        for interface in interfaces:
+            interface_networks = [x for x in networks if x["interface"] == interface]
+            
+            print COLOR_GREEN + interface + COLOR_END
+
+            for network in interface_networks:
+                if current_network and network["network"] == current_network["network"]:
+                    network_up = COLOR_BLUE + "*" + COLOR_END
+                else:
+                    network_up = ""
+
+                print "  %s %s" % (network["network"], network_up)
+    # network specified
+    else:
+        try:
+            # special case for using "down" keyword for network with no operation
+            if args.network == "down" and current_network and not args.operation:
+                network_info = current_network
+                args.operation = "down"
+            else:
+                network_info = [x for x in networks if x["network"] == args.network][0]
+
+            # no operation specified
+            if not args.operation:
+                    print COLOR_GREEN + network_info["interface"] + COLOR_END
+                    print COLOR_YELLOW + "  %s" % network_info["network"] + COLOR_END
+                    
+                    print "    type: %s" % network_info["type"]
+
+                    if network_info["type"] == "static":
+                        print "      address: %s" % network_info["address"]
+                        print "      netmask: %s" % network_info["netmask"]
+                        print "      gateway: %s" % network_info["gateway"]
+
+                    print "    connection: %s" % network_info["connection"]
+
+                    if network_info["connection"] == "wireless":
+                        print "      ssid: %s" % network_info["ssid"]
+                        print "      key: %s" % network_info["key"]
+
+            # bring network up
+            elif args.operation == "up":
+                print "bringing interface " + COLOR_GREEN + network_info["interface"] + COLOR_END + " up on network " + COLOR_YELLOW + network_info["network"] + COLOR_END + ".."
+
+                if network_info["interface"] != network_info["network"]:
+                    command = "sudo ifup %s=%s" % (network_info["interface"], network_info["network"])
+                else:
+                    command = "sudo ifup %s" % network_info["interface"]
+
+                subprocess.check_call(command, shell=True)
+
+                with open(CURRENT_INFO_PATH, "w") as f:
+                    f.write(str(network_info))
+
+            # bring network down
+            elif args.operation == "down":
+                print "bringing interface " + COLOR_GREEN + network_info["interface"] + COLOR_END + " down from network " + COLOR_YELLOW + network_info["network"] + COLOR_END + ".."
+
+                command = "sudo ifdown %s" % network_info["interface"]
+                subprocess.check_call(command, shell=True)
+
+                try:
+                    os.remove(CURRENT_INFO_PATH)
+                except:
+                    print "error removing temp file!"
+
+            # edit network configuration
+            elif args.operation == "edit":
+                command = "sudo $EDITOR %s +%s" % (network_info["file"], network_info["line"])
+
+                try:
+                    subprocess.call(command, shell=True)
+                except:
+                    print "a problem occurred running the command " + COLOR_RED + command + COLOR_END
+                    
+
+            # unknown operation
+            else:
+                print "unknown operation " + COLOR_RED + args.operation + COLOR_END + "!"
+
+        except:
+            print "network " + COLOR_RED + args.network + COLOR_END + " wasn't found!"
